@@ -1,0 +1,115 @@
+clc; clear; close all;
+
+%% 1 Caricamento File
+[filename, pathname] = uigetfile('*.csv', 'Seleziona il file CSV TableA');
+if isequal(filename,0), error('Nessun file selezionato.'); end
+T = readtable(fullfile(pathname, filename));
+
+% --- CONTROLLO NOMI COLONNE ---
+% Verifichiamo se le colonne esistono. Se il tuo CSV usa nomi diversi, modificali qui.
+vars = {'End_Pause_ts','Reg_Click_Start_ts','Creak_Start_ts','Pause_Start_ts'};
+missingVars = vars(~ismember(vars, T.Properties.VariableNames));
+if ~isempty(missingVars)
+    disp('Nomi colonne trovati nel CSV:');
+    disp(T.Properties.VariableNames);
+    error('Il CSV non contiene le colonne: %s', strjoin(missingVars, ', '));
+end
+
+for v = 1:length(vars)
+    if ~isduration(T.(vars{v})), T.(vars{v}) = duration(T.(vars{v})); end
+end
+
+[audioFileName, audioPath] = uigetfile('*.wav', 'Seleziona il file WAV');
+[audioData, Fs] = audioread(fullfile(audioPath, audioFileName));
+
+%% 2 Configurazione Deployment
+dpChoice = menu('Deployment?', 'DP1', 'DP2');
+if dpChoice == 1
+    wavStartTime = datetime('13:02:00.820','InputFormat','HH:mm:ss.SSS');
+else
+    wavStartTime = datetime('14:05:06.860','InputFormat','HH:mm:ss.SSS');
+end
+wavStart_dur = duration(hour(wavStartTime), minute(wavStartTime), second(wavStartTime));
+
+%% 3 LOGICA SURFACING (A RITROSO con NA)
+% gap_threshold = minutes(10); 
+T_proc = T; 
+fprintf('\n--- Analisi Surfacing: Inserimento NA dove gap > 10m ---\n');
+% 
+% for k = 2:height(T_proc)
+%     % Controllo gap tra fine sequenza precedente e Creak attuale
+%     gap_to_creak = T_proc.Creak_Start_ts(k) - T_proc.Pause_Start_ts(k-1);
+% 
+%     if gap_to_creak > gap_threshold
+%         fprintf('Riga %d: Surfacing rilevato (%s). Imposto EndPause = NA.\n', k, string(gap_to_creak));
+% 
+%         % 1. Impostiamo NA (NaN) per la fine della pausa
+%         T_proc.End_Pause_ts(k) = duration(NaN,0,0); 
+% 
+%         % 2. Verifichiamo che il RC sia quello immediatamente precedente al creak
+%         tempo_rc_creak = T_proc.Creak_Start_ts(k) - T_proc.Reg_Click_Start_ts(k);
+%         if tempo_rc_creak > minutes(2)
+%             T_proc.Reg_Click_Start_ts(k) = T_proc.Creak_Start_ts(k) - seconds(60);
+%         end
+%     end
+% end
+
+%% 4 Loop Plotting (Gestione NA)
+saveFolder = uigetdir(pwd, 'Seleziona cartella di output');
+sensitivity_dB = -165; 
+calib_factor = 10^(sensitivity_dB/20);
+
+for k = 1:height(T_proc)
+    % Se End_Pause è NA, facciamo partire l'estrazione 5s prima del RegClick
+    if isnan(T_proc.End_Pause_ts(k))
+        base_start = T_proc.Reg_Click_Start_ts(k) - seconds(5);
+    else
+        base_start = T_proc.End_Pause_ts(k);
+    end
+    
+    start_sec = seconds(base_start - wavStart_dur) - 2; 
+    end_sec   = seconds(T_proc.Pause_Start_ts(k) - wavStart_dur) + 2;
+    
+    if end_sec <= start_sec, continue; end
+    
+    % Estrazione audio mirata per saltare il surfacing
+    idxStart = round(max(1, start_sec * Fs));
+    idxEnd   = round(min(length(audioData), end_sec * Fs));
+    segment  = audioData(idxStart:idxEnd);
+    
+    % Spettrogramma
+    p = segment / calib_factor; 
+    [~, F, T_s, P] = spectrogram(p, hann(2048), 1024, 2048, Fs);
+    A = 10*log10(abs(P)); 
+    
+    hFig = figure('Visible','off', 'Position', [100 100 1200 600]);
+    surf(T_s, F/1000, zeros(size(A)), A, 'EdgeColor', 'none'); 
+    view(0, 90); axis tight; axis xy; clim([20 120]); colormap jet;
+    
+    cb = colorbar; cb.Title.String = '[dB re 1 \muPa^2/Hz]';
+    xlabel('Time [s]'); ylabel('Frequency [kHz]'); hold on;
+    
+    % --- Etichette (Saltiamo EndPause se è NA) ---
+    times = [T_proc.End_Pause_ts(k), T_proc.Reg_Click_Start_ts(k), ...
+             T_proc.Creak_Start_ts(k), T_proc.Pause_Start_ts(k)];
+    labels = {'EndPause', 'RegClick', 'Creak', 'Pause'};
+    yPos = [0.85, 0.75, 0.65, 0.55] * (Fs/2000); % Scala in kHz
+    
+    for i = 1:4
+        if ~isnan(times(i))
+            t_ev = seconds(times(i) - wavStart_dur) - start_sec;
+            line([t_ev t_ev], [0 Fs/2000], [2 2], 'Color', 'k', 'LineStyle', '-.');
+            text(t_ev + 0.1, yPos(i), 5, labels{i}, 'BackgroundColor', 'w', ...
+                'Rotation', 90, 'FontSize', 7, 'FontWeight', 'bold');
+        end
+    end
+    
+    % Titolo con gestione stringa NA
+    title_ep = string(T_proc.End_Pause_ts(k));
+    if isnan(T_proc.End_Pause_ts(k)), title_ep = "NA"; end
+    title(sprintf('Sequence #%d | %s -> %s', k, title_ep, string(T_proc.Pause_Start_ts(k))), 'Interpreter', 'none');
+    
+    exportgraphics(hFig, fullfile(saveFolder, sprintf('%03d_Sequence.png', k)), 'Resolution', 200);
+    close(hFig);
+end
+disp('✅ Processo completato.');
