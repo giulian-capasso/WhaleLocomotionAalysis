@@ -8,7 +8,7 @@ T = readtable(fullfile(pathname, filename));
 [matFile, matPath] = uigetfile('*.mat', 'Seleziona il file .mat con il vettore DN');
 if isequal(matFile,0), error('Caricamento .mat annullato.'); end
 matData = load(fullfile(matPath, matFile));
-DN = matData.DN; % Vettore serial datenum
+DN = matData.DN; 
 
 % Controllo colonne CSV
 requiredVars = {'Deployment_ID','Type','Start_duration_timestamp'};
@@ -20,12 +20,12 @@ Whale_ID = T.Deployment_ID{1};
 pauseIdx = find(strcmp(T.Type, 'pause'));
 gap_threshold = minutes(10); 
 
-%% 2️⃣ Costruzione Tabella Unica (TS + IDX)
+%% 2️⃣ Costruzione Tabella Unica (TS + IDX) con millisecondi
 TableA_Final = table();
 
 if length(pauseIdx) >= 2
     for i = 1:length(pauseIdx)
-        % Inizializzazione variabili Duration
+        % Inizializzazione Duration con precisione garantita
         End_Pause_ts = duration(NaN,0,0);
         Reg_Click_Start_ts = duration(NaN,0,0);
         Creak_Start_ts = duration(NaN,0,0);
@@ -72,41 +72,42 @@ if length(pauseIdx) >= 2
             end
         end
 
-        % --- PROMPT MANUALE ---
+        % --- PROMPT MANUALE (Formato SSS) ---
         if needsManualInput
             creak_info = 'Creak non trovato';
             if ~isnan(csv_creak_row), creak_info = sprintf('CSV Row: %d', csv_creak_row); end
 
-            prompt = {['End_Pause (Default: ', char(End_Pause_ts), ')'], ...
-                      ['Reg_Click_Start (Default: ', char(Reg_Click_Start_ts), ')'], ...
+            prompt = {['End_Pause (hh:mm:ss.SSS) - Default: ', char(End_Pause_ts)], ...
+                      ['Reg_Click_Start (hh:mm:ss.SSS) - Default: ', char(Reg_Click_Start_ts)], ...
                       ['Creak_Start (', creak_info, ')'], ...
                       'Pause_Start (Già rilevata)'};
             
             dlgtitle = sprintf('%s | Seq #%d', msg, i);
-            definput = {'', '', char(Creak_Start_ts), char(Pause_Start_ts)};
-            answer = inputdlg(prompt, dlgtitle, [1 50], definput);
+            definput = {char(End_Pause_ts), char(Reg_Click_Start_ts), char(Creak_Start_ts), char(Pause_Start_ts)};
+            answer = inputdlg(prompt, dlgtitle, [1 60], definput);
             
             if ~isempty(answer)
-                if ~isempty(answer{1}), End_Pause_ts = duration(answer{1},'InputFormat','hh:mm:ss.SSS'); end
-                if ~isempty(answer{2}), Reg_Click_Start_ts = duration(answer{2},'InputFormat','hh:mm:ss.SSS'); end
+                End_Pause_ts = duration(answer{1},'InputFormat','hh:mm:ss.SSS');
+                Reg_Click_Start_ts = duration(answer{2},'InputFormat','hh:mm:ss.SSS');
                 Creak_Start_ts = duration(answer{3},'InputFormat','hh:mm:ss.SSS');
                 Pause_Start_ts = duration(answer{4},'InputFormat','hh:mm:ss.SSS');
             end
         end
 
-        % --- CONVERSIONE ISTANTANEA IN INDICI ---
+        % --- CONVERSIONE PRECISA IN INDICI ---
         ts_vals = [End_Pause_ts, Reg_Click_Start_ts, Creak_Start_ts, Pause_Start_ts];
         idx_vals = NaN(1, 4);
         
         for c = 1:4
             if ~isnan(ts_vals(c))
+                % Calcolo con precisione millimetrica
                 target_dn = DN(1) + seconds(ts_vals(c)) / 86400;
                 [~, closest_idx] = min(abs(DN - target_dn));
                 idx_vals(c) = closest_idx;
             end
         end
 
-        % --- CREAZIONE RIGA COMPLETA ---
+        % --- CREAZIONE RIGA ---
         newRow = table({Whale_ID}, ...
             End_Pause_ts, idx_vals(1), ...
             Reg_Click_Start_ts, idx_vals(2), ...
@@ -124,9 +125,16 @@ if length(pauseIdx) >= 2
     end
 end
 
-% 3️⃣ Salvataggio Finale
-[file, path] = uiputfile('TableA_HuntingSequences_Full.csv', 'Salva Tabella Completa');
+%% 3️⃣ Salvataggio con Formattazione Millisecondi
+% Forziamo il formato millisecondi per tutte le colonne duration prima del salvataggio
+TableA_Final.End_Pause_ts.Format = 'hh:mm:ss.SSS';
+TableA_Final.Reg_Click_Start_ts.Format = 'hh:mm:ss.SSS';
+TableA_Final.Creak_Start_ts.Format = 'hh:mm:ss.SSS';
+TableA_Final.Pause_Start_ts.Format = 'hh:mm:ss.SSS';
+
+[file, path] = uiputfile('TableA_HuntingSequences_MS_Precision.csv', 'Salva Tabella Completa');
 if ischar(file)
-    writetable(TableA_Final, fullfile(path, file));
-    fprintf('✅ Tabella completa (TS + IDX) salvata correttamente.\n');
+    fullPath = fullfile(path, file);
+    writetable(TableA_Final, fullPath);
+    fprintf('✅ Tabella salvata con successo (Millisecondi preservati) in:\n%s\n', fullPath);
 end
