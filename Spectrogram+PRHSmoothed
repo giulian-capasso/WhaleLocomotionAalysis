@@ -197,18 +197,25 @@ for k = 1:height(myTable)
     ylim([-180 180]); grid on;
     set(gca, 'YTick', -180:90:180);
     
+    % Forza il colore dell'asse sinistro (PRH) in nero
+    ax = gca;
+    ax.YAxis(1).Color = [0 0 0];
+
     yyaxis right
     plot(t_sensor, T_prh.depth_smoothed(sensorRange), 'k', 'LineWidth', 2.2); % Depth (Black)
     set(gca, 'YDir', 'reverse'); % Profondità invertita
     ylabel('Depth [m]', 'FontWeight', 'bold');
     
+    % Forza il colore dell'asse destro (Depth) in nero
+    ax.YAxis(2).Color = [0 0 0];
+
     xlabel('Time [s] (Relative to start)', 'FontWeight', 'bold');
     legend('Pitch', 'Roll', 'Heading', 'Depth', ...
            'Location', 'southoutside', 'Orientation', 'horizontal', 'FontSize', 10);
     xlim([T_s(1) T_s(end)]); % Sincronizzazione X perfetta
 
     % 5. Esportazione Finale
-    saveName = fullfile(saveFolder, sprintf('%03d_Full_Profile_Smoothed.png', k));
+    saveName = fullfile(saveFolder, sprintf('%03d_Sequence_PRH.png', k));
     exportgraphics(hFig, saveName, 'Resolution', 300);
     close(hFig);
 end
