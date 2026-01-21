@@ -1,0 +1,203 @@
+clc; clear; close all;
+
+%% 1. Load Files
+[fileA, pathA] = uigetfile('*.csv', 'Select Table A CSV');
+T_proc = readtable(fullfile(pathA, fileA));
+
+[filePRH, pathPRH] = uigetfile('*.csv', 'Select PRH_smoothed CSV');
+T_prh = readtable(fullfile(pathPRH, filePRH));
+
+[fileMAT, pathMAT] = uigetfile('*.mat', 'Select .mat file with DN vector');
+matData = load(fullfile(pathMAT, fileMAT));
+DN = matData.DN;
+
+% Fix Table A durations
+vars = {'End_Pause_ts','Reg_Click_Start_ts','Creak_Start_ts','Pause_Start_ts'};
+for v = 1:length(vars)
+    if ~isduration(T_proc.(vars{v})), T_proc.(vars{v}) = duration(T_proc.(vars{v})); end
+end
+
+%% 2. The Fix & PRH Check
+DN_durations = timeofday(datetime(DN, 'ConvertFrom', 'datenum'));
+
+k = 1; % Row to check
+original_ts = T_proc.Creak_Start_ts(k);
+
+% 1. Find the CORRECT index in DN
+[~, correct_idx] = min(abs(DN_durations - original_ts));
+
+% 2. Get the data from the Smoothed CSV at that same index
+% Checking if the index exists in the PRH table
+if correct_idx <= height(T_prh)
+    prh_pitch = T_prh.pitch_smoothed(correct_idx);
+    prh_depth = T_prh.depth_smoothed(correct_idx);
+else
+    prh_pitch = NaN; prh_depth = NaN;
+end
+
+%% 3. Compare Results
+fprintf('--- VERIFICATION FOR SEQUENCE #%d ---\n', k);
+fprintf('Original CSV Time:    %s\n', char(original_ts));
+
+% Your Old School Method
+fprintf('Old School (DN):      %s\n', datestr(DN(correct_idx), 'HH:MM:SS:FFF'));
+
+% Modern Method Check
+mapped_dur = DN_durations(correct_idx);
+mapped_dur.Format = 'hh:mm:ss.SSS';
+fprintf('Mapped Duration:      %s\n', char(mapped_dur));
+
+% Error calculation
+error_ms = milliseconds(original_ts - mapped_dur);
+fprintf('Difference (ms):      %.3f ms\n', error_ms);
+
+% PRH Smoothed Check
+fprintf('--- PRH SMOOTHED CSV CHECK ---\n');
+fprintf('Matching Row in CSV:  %d\n', correct_idx);
+fprintf('Pitch at this moment: %.2f\n', prh_pitch);
+fprintf('Depth at this moment: %.2f m\n', prh_depth);
+
+if abs(error_ms) < 100
+    fprintf('\nResult: ✅ SUCCESS! Table A, DN vector, and PRH CSV are aligned.\n');
+else
+    fprintf('\nResult: ❌ MISMATCH. Check fs_sensor or start times.\n');
+end
+%% 2-3. Verifica Incrociata: Timestamp (Table A/MAT) + Indici (MAT/CSV)
+fprintf('\n--- TRIPLA VERIFICA DI ALLINEAMENTO ---\n');
+% Intestazione: TS = Timestamp, IDX = Indice (Riga)
+fprintf('%-5s | %-12s | %-12s | %-10s | %-10s | %-8s\n', ...
+    'Seq#', 'TableA (TS)', 'PRH.mat (TS)', 'MAT (IDX)', 'CSV (IDX)', 'CHECK');
+fprintf('%s\n', repmat('-', 1, 75));
+
+count_match = 0;
+tolerance_ms = 100;
+
+for k = 1:height(T_proc)
+    t_ref = T_proc.Creak_Start_ts(k);
+    
+    if isduration(t_ref) && ~isnan(t_ref)
+        % --- STEP 1: Allineamento Temporale (Table A <-> .mat) ---
+        [~, mat_idx] = min(abs(DN_durations - t_ref));
+        mat_ts = DN_durations(mat_idx);
+        mat_ts.Format = 'hh:mm:ss.SSS';
+        
+        diff_ms = abs(milliseconds(t_ref - mat_ts));
+        
+        % --- STEP 2: Allineamento Indici (.mat <-> CSV) ---
+        % L'indice estratto dal vettore DN deve esistere nel CSV
+        csv_height = height(T_prh);
+        csv_idx = mat_idx; % Nel sistema corretto, l'indice è identico
+        
+        in_range = (csv_idx <= csv_height);
+        
+        % --- STEP 3: Validazione Finale ---
+        % OK se: Differenza tempo < soglia E l'indice esiste nel CSV
+        if diff_ms <= tolerance_ms && in_range
+            check_status = '✅ MATCH';
+            count_match = count_match + 1;
+        elseif ~in_range
+            check_status = '❌ NO CSV';
+        else
+            check_status = '❌ OFFSET';
+        end
+        
+        % Stampa dei risultati
+        fprintf('%-5d | %-12s | %-12s | %-10d | %-10d | %-8s\n', ...
+            k, char(t_ref), char(mat_ts), mat_idx, csv_idx, check_status);
+            
+    else
+        fprintf('%-5d | %-12s | %-12s | %-10s | %-10s | %-8s\n', ...
+            k, 'NaN', '-', '-', '-', '⏭️ SKIP');
+    end
+end
+
+fprintf('%s\n', repmat('-', 1, 75));
+fprintf('Conferma: %d righe su %d sono perfettamente allineate.\n', count_match, height(T_proc));
+
+%% 4. Verifica Contenuto Dati: .mat vs CSV Smoothed
+fprintf('\n--- VERIFICA DATI FISICI: .mat vs CSV Smoothed ---\n');
+fprintf('%-5s | %-10s | %-12s | %-12s | %-10s\n', ...
+    'Seq#', 'IDX', 'Depth (.mat)', 'Depth (CSV)', 'STATUS');
+fprintf('%s\n', repmat('-', 1, 60));
+
+% Nota: Assicurati che nel tuo workspace esistano le variabili del .mat
+% Ad esempio: p (depth), pitch, roll, head.
+% Se hanno nomi diversi, cambiali qui sotto (es. matData.p)
+
+for k = 1:height(T_proc)
+    t_ref = T_proc.Creak_Start_ts(k);
+    
+    if isduration(t_ref) && ~isnan(t_ref)
+        % 1. Recupero l'indice già validato
+        [~, idx] = min(abs(DN_durations - t_ref));
+        
+        % 2. Estrazione dati dal .mat (cambia 'p' con il nome variabile della profondità nel tuo .mat)
+        % Se il .mat è caricato come struct 'matData', usa matData.p(idx)
+        if isfield(matData, 'p')
+            val_mat = matData.p(idx); 
+        else
+            val_mat = NaN; % Se non trovi la variabile depth nel .mat
+        end
+        
+        % 3. Estrazione dati dal CSV Smoothed
+        val_csv = T_prh.depth_smoothed(idx);
+        
+        % 4. Calcolo differenza
+        diff_depth = abs(val_mat - val_csv);
+        
+        % 5. Check: la profondità deve essere quasi identica (tolleranza 0.5m per lo smoothing)
+        if diff_depth < 0.5
+            data_check = 'OK';
+        else
+            data_check = 'CHECK';
+        end
+        
+        fprintf('%-5d | %-10d | %-12.2f | %-12.2f | %-10s\n', ...
+            k, idx, val_mat, val_csv, data_check);
+    end
+end
+fprintf('%s\n', repmat('-', 1, 60));
+
+%% 5. Verifica Finale Sensori (Con correzione Angolare Circolare)
+fprintf('\n--- VERIFICA INTEGRITÀ (Corretta per rotazioni 360°) ---\n');
+fprintf('%-5s | %-8s | %-10s | %-10s | %-10s | %-8s\n', ...
+    'Seq#', 'IDX', 'DEPTH (m)', 'PITCH (Diff)', 'ROLL (Diff)', 'STATUS');
+fprintf('%s\n', repmat('-', 1, 75));
+
+tol_deg = 10; % Alziamo a 10 per via dello smoothing pesante
+tol_m = 0.5;  
+
+for k = 1:height(T_proc)
+    t_ref = T_proc.Creak_Start_ts(k);
+    
+    if isduration(t_ref) && ~isnan(t_ref)
+        [~, idx] = min(abs(DN_durations - t_ref));
+        
+        % 1. .mat (RAD -> DEG)
+        d_mat = matData.p(idx);
+        p_mat = matData.pitch(idx) * (180/pi); 
+        r_mat = matData.roll(idx) * (180/pi);
+        
+        % 2. CSV
+        d_csv = T_prh.depth_smoothed(idx);
+        p_csv = T_prh.pitch_smoothed(idx);
+        r_csv = T_prh.roll_smoothed(idx);
+        
+        % 3. DIFFERENZA CIRCOLARE (Fondamentale per eliminare gli errori di 360°)
+        % Questa formula calcola la distanza minima su un cerchio
+        diff_d = abs(d_mat - d_csv);
+        diff_p = abs(mod(p_mat - p_csv + 180, 360) - 180);
+        diff_r = abs(mod(r_mat - r_csv + 180, 360) - 180);
+        
+        % 4. Validazione
+        if diff_d < tol_m && diff_p < tol_deg && diff_r < tol_deg
+            status = '✅ MATCH';
+        else
+            status = '⚠️ CHECK';
+        end
+        
+        fprintf('%-5d | %-8d | %6.1f(%2.1f) | %6.1f(%4.1f) | %6.1f(%4.1f) | %-8s\n', ...
+            k, idx, d_csv, diff_d, p_csv, diff_p, r_csv, diff_r, status);
+    end
+end
+fprintf('%s\n', repmat('-', 1, 75));
