@@ -1,6 +1,5 @@
 clc; clear; close all;
-
-%% 1️⃣ Caricamento File (CSV e MAT)
+%% 1 Caricamento File (CSV e MAT)
 [filename, pathname] = uigetfile('*.csv', 'Seleziona il CSV con tutti gli eventi');
 if isequal(filename,0), error('Nessun file selezionato.'); end
 T = readtable(fullfile(pathname, filename));
@@ -10,22 +9,19 @@ if isequal(matFile,0), error('Caricamento .mat annullato.'); end
 matData = load(fullfile(matPath, matFile));
 DN = matData.DN; 
 
-% Controllo colonne CSV
-requiredVars = {'Deployment_ID','Type','Start_duration_timestamp'};
-if ~all(ismember(requiredVars, T.Properties.VariableNames))
-    error('Il CSV deve contenere Deployment_ID, Type, Start_duration_timestamp');
-end
+% --- PRE-CALCOLO DURATE ---
+% Convertiamo l'intero vettore DN in durate (Time of Day) una sola volta per velocizzare
+DN_durations = timeofday(datetime(DN, 'ConvertFrom', 'datenum'));
 
 Whale_ID = T.Deployment_ID{1};
 pauseIdx = find(strcmp(T.Type, 'pause'));
 gap_threshold = minutes(10); 
 
-%% 2️⃣ Costruzione Tabella Unica (TS + IDX) con millisecondi
+%% 2 Costruzione Tabella Unica (TS + IDX) con Prompt Semplificato
 TableA_Final = table();
-
 if length(pauseIdx) >= 2
     for i = 1:length(pauseIdx)
-        % Inizializzazione Duration con precisione garantita
+        % Inizializzazione variabili
         End_Pause_ts = duration(NaN,0,0);
         Reg_Click_Start_ts = duration(NaN,0,0);
         Creak_Start_ts = duration(NaN,0,0);
@@ -34,107 +30,96 @@ if length(pauseIdx) >= 2
         needsManualInput = false;
         msg = '';
         csv_creak_row = NaN;
-
-        % --- LOGICA DI RILEVAMENTO ---
+        
         if i == 1
+            % --- PRIMA RIGA ---
             needsManualInput = true;
             Pause_Start_ts = T.Start_duration_timestamp(pauseIdx(1));
             preIdx = 1:(pauseIdx(1)-1);
             creakPre = find(strcmp(T.Type(preIdx), 'creak'));
             if ~isempty(creakPre)
-                csv_creak_row = creakPre(end);
+                csv_creak_row = preIdx(creakPre(end));
                 Creak_Start_ts = T.Start_duration_timestamp(csv_creak_row); 
             end
             msg = 'PRIMA RIGA rilevata.';
         else
+            % --- LOGICA STANDARD ---
             idxPrevPause = pauseIdx(i-1);
             idxCurrPause = pauseIdx(i);
-            Pause_End_Prev = T.Start_duration_timestamp(idxPrevPause);
-            Pause_Start_ts = T.Start_duration_timestamp(idxCurrPause);
+            Pause_End_Prev_Ref = T.Start_duration_timestamp(idxPrevPause); 
+            Pause_Start_ts = T.Start_duration_timestamp(idxCurrPause);     
             
             seqIdx = (idxPrevPause+1):(idxCurrPause-1);
             creakCurr_rel = find(strcmp(T.Type(seqIdx), 'creak'));
+            regIdx = find(strcmp(T.Type(seqIdx), 'regular_click'));
             
             if ~isempty(creakCurr_rel)
                 csv_creak_row = seqIdx(creakCurr_rel(end));
                 Creak_Start_ts = T.Start_duration_timestamp(csv_creak_row);
+                first_creak_ts = T.Start_duration_timestamp(seqIdx(creakCurr_rel(1)));
                 
-                if (Creak_Start_ts - Pause_End_Prev) > gap_threshold
+                if (Creak_Start_ts - Pause_End_Prev_Ref) > gap_threshold
                     needsManualInput = true;
-                    msg = sprintf('SURFACING rilevato (Gap > 10m).');
+                    msg = 'SURFACING rilevato.';
                 else
-                    End_Pause_ts = Pause_End_Prev;
-                    regIdx = seqIdx(strcmp(T.Type(seqIdx), 'regular_click'));
-                    if ~isempty(regIdx), Reg_Click_Start_ts = T.Start_duration_timestamp(regIdx(1)); end
+                    % --- DETERMINAZIONE AUTOMATICA ---
+                    if ~isempty(regIdx)
+                        Reg_Click_Start_ts = T.Start_duration_timestamp(seqIdx(regIdx(1)));
+                        End_Pause_ts = Reg_Click_Start_ts;
+                    else
+                        % Foraggiamento intenso: End_Pause è il primo Creak, RegClick è NA
+                        End_Pause_ts = first_creak_ts;
+                        Reg_Click_Start_ts = duration(NaN,0,0); 
+                    end
                 end
             else
-                End_Pause_ts = Pause_End_Prev;
+                End_Pause_ts = Pause_End_Prev_Ref;
             end
         end
-
-        % --- PROMPT MANUALE (Formato SSS) ---
+        
+        % --- FINESTRA DI DIALOGO SEMPLIFICATA ---
         if needsManualInput
-            creak_info = 'Creak non trovato';
-            if ~isnan(csv_creak_row), creak_info = sprintf('CSV Row: %d', csv_creak_row); end
+            % Se RegClick è NaN (es. prima riga o surfacing senza regclick), 
+            % usiamo il valore di End_Pause come base per il prompt
+            act_start_def = End_Pause_ts;
+            if isnan(act_start_def), act_start_def = Reg_Click_Start_ts; end
 
-            prompt = {['End_Pause (hh:mm:ss.SSS) - Default: ', char(End_Pause_ts)], ...
-                      ['Reg_Click_Start (hh:mm:ss.SSS) - Default: ', char(Reg_Click_Start_ts)], ...
-                      ['Creak_Start (', creak_info, ')'], ...
-                      'Pause_Start (Già rilevata)'};
+            prompt = {'Activity_Start (EndPause/RegClick)', ...
+                      ['Creak_Start (CSV Row: ', num2str(csv_creak_row), ')'], ...
+                      'Pause_Start'};
+            definput = {char(act_start_def), char(Creak_Start_ts), char(Pause_Start_ts)};
             
-            dlgtitle = sprintf('%s | Seq #%d', msg, i);
-            definput = {char(End_Pause_ts), char(Reg_Click_Start_ts), char(Creak_Start_ts), char(Pause_Start_ts)};
-            answer = inputdlg(prompt, dlgtitle, [1 60], definput);
-            
+            answer = inputdlg(prompt, [msg, ' | Seq #', num2str(i)], [1 60], definput);
             if ~isempty(answer)
-                End_Pause_ts = duration(answer{1},'InputFormat','hh:mm:ss.SSS');
-                Reg_Click_Start_ts = duration(answer{2},'InputFormat','hh:mm:ss.SSS');
-                Creak_Start_ts = duration(answer{3},'InputFormat','hh:mm:ss.SSS');
-                Pause_Start_ts = duration(answer{4},'InputFormat','hh:mm:ss.SSS');
+                val_start = duration(answer{1},'InputFormat','hh:mm:ss.SSS');
+                End_Pause_ts = val_start;
+                Reg_Click_Start_ts = val_start; % Unico input per entrambi
+                Creak_Start_ts = duration(answer{2},'InputFormat','hh:mm:ss.SSS');
+                Pause_Start_ts = duration(answer{3},'InputFormat','hh:mm:ss.SSS');
             end
         end
-
-        % --- CONVERSIONE PRECISA IN INDICI ---
+        
+        % --- MATCHING INDICI ---
         ts_vals = [End_Pause_ts, Reg_Click_Start_ts, Creak_Start_ts, Pause_Start_ts];
         idx_vals = NaN(1, 4);
-        
         for c = 1:4
-            if ~isnan(ts_vals(c))
-                % Calcolo con precisione millimetrica
-                target_dn = DN(1) + seconds(ts_vals(c)) / 86400;
-                [~, closest_idx] = min(abs(DN - target_dn));
+            if ~any(isnan(ts_vals(c)))
+                [~, closest_idx] = min(abs(DN_durations - ts_vals(c)));
                 idx_vals(c) = closest_idx;
             end
         end
-
-        % --- CREAZIONE RIGA ---
-        newRow = table({Whale_ID}, ...
-            End_Pause_ts, idx_vals(1), ...
-            Reg_Click_Start_ts, idx_vals(2), ...
-            Creak_Start_ts, idx_vals(3), ...
-            Pause_Start_ts, idx_vals(4), ...
-            'VariableNames', {
-                'Whale_ID', ...
-                'End_Pause_ts', 'End_Pause_idx', ...
-                'Reg_Click_Start_ts', 'Reg_Click_idx', ...
-                'Creak_Start_ts', 'Creak_idx', ...
-                'Pause_Start_ts', 'Pause_idx'
-            });
         
+        newRow = table({Whale_ID}, End_Pause_ts, idx_vals(1), Reg_Click_Start_ts, idx_vals(2), ...
+            Creak_Start_ts, idx_vals(3), Pause_Start_ts, idx_vals(4), ...
+            'VariableNames', {'Whale_ID','End_Pause_ts','End_Pause_idx','Reg_Click_Start_ts','Reg_Click_idx',...
+            'Creak_Start_ts','Creak_idx','Pause_Start_ts','Pause_idx'});
         TableA_Final = [TableA_Final; newRow];
     end
 end
-
-%% 3️⃣ Salvataggio con Formattazione Millisecondi
-% Forziamo il formato millisecondi per tutte le colonne duration prima del salvataggio
+%% 3 Salvataggio
 TableA_Final.End_Pause_ts.Format = 'hh:mm:ss.SSS';
 TableA_Final.Reg_Click_Start_ts.Format = 'hh:mm:ss.SSS';
 TableA_Final.Creak_Start_ts.Format = 'hh:mm:ss.SSS';
 TableA_Final.Pause_Start_ts.Format = 'hh:mm:ss.SSS';
-
-[file, path] = uiputfile('TableA_HuntingSequences_MS_Precision.csv', 'Salva Tabella Completa');
-if ischar(file)
-    fullPath = fullfile(path, file);
-    writetable(TableA_Final, fullPath);
-    fprintf('✅ Tabella salvata con successo (Millisecondi preservati) in:\n%s\n', fullPath);
-end
+[file, path] = uiputfile('TableA_HuntingSequences_Corrected.csv', 'Salva Tabella');
+if ischar(file), writetable(TableA_Final, fullfile(path, file)); end
