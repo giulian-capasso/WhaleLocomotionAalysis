@@ -1,20 +1,13 @@
 clc; clear; close all;
 
-%% 1 Caricamento File
+%% 1. Caricamento File
 [filename, pathname] = uigetfile('*.csv', 'Seleziona il file CSV TableA');
 if isequal(filename,0), error('Nessun file selezionato.'); end
 T = readtable(fullfile(pathname, filename));
 
-% --- CONTROLLO NOMI COLONNE ---
-% Verifichiamo se le colonne esistono. Se il tuo CSV usa nomi diversi, modificali qui.
+% --- UNIFORMITÀ NOMI ---
+% Usiamo T come tabella di riferimento principale per tutto lo script
 vars = {'End_Pause_ts','Reg_Click_Start_ts','Creak_Start_ts','Pause_Start_ts'};
-missingVars = vars(~ismember(vars, T.Properties.VariableNames));
-if ~isempty(missingVars)
-    disp('Nomi colonne trovati nel CSV:');
-    disp(T.Properties.VariableNames);
-    error('Il CSV non contiene le colonne: %s', strjoin(missingVars, ', '));
-end
-
 for v = 1:length(vars)
     if ~isduration(T.(vars{v})), T.(vars{v}) = duration(T.(vars{v})); end
 end
@@ -22,7 +15,7 @@ end
 [audioFileName, audioPath] = uigetfile('*.wav', 'Seleziona il file WAV');
 [audioData, Fs] = audioread(fullfile(audioPath, audioFileName));
 
-%% 2 Configurazione Deployment
+%% 2. Configurazione Deployment
 dpChoice = menu('Deployment?', 'DP1', 'DP2');
 if dpChoice == 1
     wavStartTime = datetime('13:02:00.820','InputFormat','HH:mm:ss.SSS');
@@ -31,309 +24,134 @@ else
 end
 wavStart_dur = duration(hour(wavStartTime), minute(wavStartTime), second(wavStartTime));
 
-%% 3 Loop Plotting
-saveFolder = uigetdir(pwd, 'Seleziona cartella di output');
-sensitivity_dB = -165; 
-calib_factor = 10^(sensitivity_dB/20);
-
-for k = 1:height(T_proc)
-    % Logica base_start (Invariata per i NA)
-    if isnan(T_proc.End_Pause_ts(k))
-        base_start = T_proc.Reg_Click_Start_ts(k) - seconds(5);
-    else
-        base_start = T_proc.End_Pause_ts(k);
-    end
-    
-    start_sec = seconds(base_start - wavStart_dur) - 2; 
-    end_sec   = seconds(T_proc.Pause_Start_ts(k) - wavStart_dur) + 2;
-    
-    if end_sec <= start_sec, continue; end
-    
-    idxStart = round(max(1, start_sec * Fs));
-    idxEnd   = round(min(length(audioData), end_sec * Fs));
-    segment  = audioData(idxStart:idxEnd);
-    
-    % Spettrogramma
-    p = segment / calib_factor; 
-    [~, F, T_s, P] = spectrogram(p, hann(2048), 1024, 2048, Fs);
-    A = 10*log10(abs(P)); 
-    
-    hFig = figure('Visible','off', 'Position', [100 100 1300 650]);
-    surf(T_s, F/1000, zeros(size(A)), A, 'EdgeColor', 'none'); 
-    
-    % --- RITORNO AL JET CON FONDO CHIARO ---
-    shading interp;      
-    view(0, 90); axis tight; axis xy; 
-    
-    % IMPOSTAZIONE CHIAVE: 
-    % Mettendo il minimo a 25 o 28, il fondo diventa un blu acceso (azzurro) 
-    clim([28 115]);      
-    
-    colormap jet; % con fondo meno "pesante"
-    
-    cb = colorbar; cb.Title.String = '[dB re 1 \muPa^2/Hz]';
-    xlabel('Time [s]'); ylabel('Frequency [kHz]'); hold on;
-    
-    % --- Etichette (Torniamo al Nero per massima visibilità) ---
-    times = [T_proc.End_Pause_ts(k), T_proc.Reg_Click_Start_ts(k), ...
-             T_proc.Creak_Start_ts(k), T_proc.Pause_Start_ts(k)];
-    labels = {'EndPause', 'RegClick', 'Creak', 'Pause'};
-    
-    maxF = Fs/2000;
-    yPos = [0.85, 0.75, 0.65, 0.55] * maxF;
-    
-    for i = 1:4
-        if ~isnan(times(i))
-            t_ev = seconds(times(i) - wavStart_dur) - start_sec;
-            line([t_ev t_ev], [0 maxF], [5 5], 'Color', 'k', 'LineStyle', '--', 'LineWidth', 1);
-            text(t_ev + 0.1, yPos(i), 10, labels{i}, 'BackgroundColor', 'w', ...
-                'Rotation', 90, 'FontSize', 7, 'FontWeight', 'bold', 'EdgeColor', 'k', 'Margin', 1.5);
-        end
-    end
-    
-    title_ep = string(T_proc.End_Pause_ts(k));
-    if isnan(T_proc.End_Pause_ts(k)), title_ep = "NA"; end
-    title(sprintf('Sequence #%d | %s -> %s', k, title_ep, string(T_proc.Pause_Start_ts(k))), 'Interpreter', 'none');
-    
-    exportgraphics(hFig, fullfile(saveFolder, sprintf('%03d_Sequence.png', k)), 'Resolution', 300);
-    close(hFig);
-end
-
-%% 4️ CSV PRH (smoothed)
-% Caricamento del file CSV generato dagli script Python (es. _data.csv)
+%% 3. Caricamento PRH Smoothed
 [csvPRHFile, csvPRHPath] = uigetfile('*.csv', 'Seleziona il CSV con PRH_smoothed');
 if isequal(csvPRHFile,0), error('Caricamento CSV annullato.'); end
-%% 5 Plotting
 T_prh = readtable(fullfile(csvPRHPath, csvPRHFile));
 
-saveFolder = uigetdir(pwd, 'Seleziona cartella di output per i profili completi');
+%% 4. Configurazione Parametri e Cartelle
+saveFolder = uigetdir(pwd, 'Seleziona cartella di output per i grafici');
+if isequal(saveFolder,0), error('Cartella non selezionata.'); end
 
-% --- Parametri di Analisi ---
-fs_sensor = 10; % Frequenza campionamento sensori da script Python
+% Definiamo myTable partendo da T (caricata nella Sezione 1)
+myTable = T; 
+
+% Parametri necessari per il plotting
+if ~exist('fs_sensor','var'), fs_sensor = 10; end
 sensitivity_dB = -165; 
 calib_factor = 10^(sensitivity_dB/20);
 
-% Utilizziamo la tabella T caricata nella Sezione 1 (o T_proc se modificata)
-myTable = T; 
-
-fprintf('\nGenerazione profili PRH + Acustica in corso...\n');
-
+%% 5. Plotting con Nitidezza, Saturazione e Durata Dinamica
+fprintf('\nGenerazione grafici in corso...\n');
 for k = 1:height(myTable)
-    % 1. Determina Finestra Temporale (con gestione NA)
-    if isnan(myTable.End_Pause_ts(k))
-        base_start = myTable.Reg_Click_Start_ts(k) - seconds(5);
+    % --- 1. CALCOLO TEMPI, OFFSET E DURATA ---
+    t_ep = myTable.End_Pause_ts(k);
+    t_rc = myTable.Reg_Click_Start_ts(k);
+    t_ck = myTable.Creak_Start_ts(k);
+    t_ps = myTable.Pause_Start_ts(k);
+    
+    t_evento_ref = t_ep;
+    if isnan(t_evento_ref), t_evento_ref = t_rc; end
+    if isnan(t_evento_ref), t_evento_ref = t_ck; end 
+    
+    % Calcolo durata effettiva della sequenza (senza i buffer di visualizzazione)
+    dur_raw = seconds(t_ps - t_evento_ref);
+    if dur_raw < 60
+        dur_str = sprintf('%.0fs', dur_raw);
     else
-        base_start = myTable.End_Pause_ts(k);
+        dur_min = floor(dur_raw/60);
+        dur_sec = mod(dur_raw, 60);
+        dur_str = sprintf('%dm %.0fs', dur_min, dur_sec);
     end
+
+    start_sec = seconds(t_evento_ref - wavStart_dur) - 2; 
+    end_sec   = seconds(t_ps - wavStart_dur) + 2;
     
-    start_sec = seconds(base_start - wavStart_dur) - 2; 
-    end_sec   = seconds(myTable.Pause_Start_ts(k) - wavStart_dur) + 2;
-    
-    % Salto se i tempi non sono coerenti
     if end_sec <= start_sec, continue; end
     
-    % 2. Estrazione Audio e Calcolo Spettrogramma
-    idxStart = round(max(1, start_sec * Fs));
-    idxEnd   = round(min(length(audioData), end_sec * Fs));
-    segment  = audioData(idxStart:idxEnd);
+    % --- 2. ESTRAZIONE E ANALISI AUDIO ---
+    idxStart_audio = round(max(1, start_sec * Fs));
+    idxEnd_audio   = round(min(length(audioData), end_sec * Fs));
+    segment = audioData(idxStart_audio:idxEnd_audio);
+    if isempty(segment), continue; end
     
     p_seg = segment / calib_factor; 
-    nwin = 4096;
-    noverlap = round(nwin * 0.9); % 90% overlap per effetto "liscio"
-    [~, F, T_s, P] = spectrogram(p_seg, hann(nwin), noverlap, nwin, Fs);
+    nfft = 2048; 
+    [~, F, T_s, P] = spectrogram(p_seg, hann(nfft), nfft/2, nfft, Fs);
     A = 10*log10(abs(P)); 
     
-    % 3. Estrazione e Pulizia Dati Sensori (Rimozione diagonali di wrapping)
+    % --- 3. ESTRAZIONE SENSORI ---
     sIdx_sensor = round(max(1, start_sec * fs_sensor));
     eIdx_sensor = round(min(height(T_prh), end_sec * fs_sensor));
     sensorRange = sIdx_sensor:eIdx_sensor;
-    
-    % Vettore tempo per i sensori (allineato allo spettrogramma)
     t_sensor = (sensorRange / fs_sensor) - start_sec;
     
     p_plot = T_prh.pitch_smoothed(sensorRange);
-    r_plot = T_prh.roll_smoothed_wrapped(sensorRange);
-    h_plot = T_prh.heading_smoothed_wrapped(sensorRange);
+    r_plot = mod(T_prh.roll_smoothed(sensorRange) + 180, 360) - 180;
+    h_plot = mod(T_prh.heading_smoothed(sensorRange) + 180, 360) - 180;
+    r_plot(abs(diff([r_plot; r_plot(end)])) > 180) = NaN;
+    h_plot(abs(diff([h_plot; h_plot(end)])) > 180) = NaN;
     
-    % TRUCCO: Rompiamo la linea se il salto tra due campioni è > 300 gradi
-    r_plot(abs(diff([r_plot; r_plot(end)])) > 300) = NaN;
-    h_plot(abs(diff([h_plot; h_plot(end)])) > 300) = NaN;
-
-    % 4. Creazione Figura e Layout
+    % --- 4. FIGURA ---
     hFig = figure('Visible','off', 'Position', [100 100 1500 950]);
-    t_layout = tiledlayout(2, 1, 'TileSpacing', 'compact', 'Padding', 'compact');
+    tiledlayout(2, 1, 'TileSpacing', 'compact', 'Padding', 'compact');
     
-    % --- PANNELLO SUPERIORE: Spettrogramma ---
-    nexttile;
-    surf(T_s, F/1000, zeros(size(A)), A, 'EdgeColor', 'none'); 
-    view(0, 90); axis tight; axis xy;
-    shading interp; colormap(gca, jet); clim([28 110]);
+    % PANNELLO 1: SPETTROGRAMMA
+    ax1 = nexttile;
+    imagesc(T_s, F/1000, A); 
+    axis xy; colormap(ax1, jet);
+    clim([30 115]); % Saturazione alta
+    
     ylabel('Freq [kHz]', 'FontWeight', 'bold');
-    title(sprintf('Sequence #%d | Acoustic & Smoothed PRH Profile', k), 'FontSize', 14);
-    cb = colorbar; cb.Label.String = 'dB re 1 \muPa^2/Hz';
-    hold on;
     
-    % Etichette Eventi (EndPause, RegClick, Creak, Pause)
-    times = [myTable.End_Pause_ts(k), myTable.Reg_Click_Start_ts(k), ...
-             myTable.Creak_Start_ts(k), myTable.Pause_Start_ts(k)];
-    labels = {'EndPause', 'RegClick', 'Creak', 'Pause'};
+    actual_start_time = wavStart_dur + seconds(start_sec + 2);
+    actual_start_time.Format = 'hh:mm:ss.SSS';
+    
+    % TITOLO AGGIORNATO CON DURATA
+    title(sprintf('Seq #%d  |  Timestamp: %s  |  Index: %d  |  Duration: %s', ...
+          k, char(actual_start_time), sIdx_sensor, dur_str), 'FontSize', 12);
+    
+    colorbar; hold on;
+    
+    % Marker Eventi
+    ev_times = [t_ep, t_rc, t_ck, t_ps];
+    ev_labels = {'EndPause', 'RegClick', 'Creak', 'Pause'};
+    skip_next = false;
     for i = 1:4
-        if ~isnan(times(i))
-            t_ev = seconds(times(i) - wavStart_dur) - start_sec;
-            line([t_ev t_ev], [0 Fs/2000], [15 15], 'Color', 'w', 'LineStyle', '--', 'LineWidth', 1.2);
-            text(t_ev, (Fs/2000)*0.85, 20, labels{i}, 'BackgroundColor', 'w', ...
-                'Rotation', 90, 'FontSize', 8, 'FontWeight', 'bold', 'Margin', 1);
+        if skip_next, skip_next = false; continue; end
+        if isnan(ev_times(i)), continue; end
+        t_curr = seconds(ev_times(i) - wavStart_dur) - start_sec;
+        label_str = ev_labels{i};
+        if i == 1 && ~isnan(ev_times(2)) && abs(seconds(ev_times(2) - ev_times(1))) < 1
+            label_str = 'RegClick';
+            skip_next = true;
         end
+        line([t_curr t_curr], [0 Fs/2000], 'Color', 'w', 'LineStyle', '--', 'LineWidth', 1.5);
+        text(t_curr, (Fs/2000)*0.9, label_str, 'Color', 'k', ...
+            'BackgroundColor', [1 1 1 0.7], 'Rotation', 90, 'FontWeight', 'bold', 'FontSize', 8);
     end
 
-    % --- PANNELLO INFERIORE: PRH & Depth ---
+    % PANNELLO 2: SENSORI
     nexttile;
     yyaxis left
-    plot(t_sensor, p_plot, 'r', 'LineWidth', 1.8); hold on; % Pitch (Red)
-    plot(t_sensor, r_plot, 'g--', 'LineWidth', 1.3);      % Roll (Green Dash)
-    plot(t_sensor, h_plot, 'b:', 'LineWidth', 1.3);       % Heading (Blue Dot)
+    plot(t_sensor, p_plot, 'r', 'LineWidth', 2); hold on;
+    plot(t_sensor, r_plot, 'g--', 'LineWidth', 2);
+    plot(t_sensor, h_plot, 'b:', 'LineWidth', 2);
+    ylabel('Degrees (PRH)', 'FontWeight', 'bold'); 
+    ylim([-190 190]); set(gca, 'YTick', -180:60:180); grid on;
+    ax = gca; ax.YAxis(1).Color = 'k';
     
-    ylabel('Degrees (PRH)', 'FontWeight', 'bold');
-    ylim([-180 180]); grid on;
-    set(gca, 'YTick', -180:90:180);
-    
-    % Forza il colore dell'asse sinistro (PRH) in nero
-    ax = gca;
-    ax.YAxis(1).Color = [0 0 0];
-
     yyaxis right
-    plot(t_sensor, T_prh.depth_smoothed(sensorRange), 'k', 'LineWidth', 2.2); % Depth (Black)
-    set(gca, 'YDir', 'reverse'); % Profondità invertita
-    ylabel('Depth [m]', 'FontWeight', 'bold');
+    plot(t_sensor, T_prh.depth_smoothed(sensorRange), 'k', 'LineWidth', 2.5);
+    set(gca, 'YDir', 'reverse'); ylabel('Depth [m]', 'FontWeight', 'bold');
+    ax.YAxis(2).Color = 'k';
     
-    % Forza il colore dell'asse destro (Depth) in nero
-    ax.YAxis(2).Color = [0 0 0];
-
-    xlabel('Time [s] (Relative to start)', 'FontWeight', 'bold');
-    legend('Pitch', 'Roll', 'Heading', 'Depth', ...
-           'Location', 'southoutside', 'Orientation', 'horizontal', 'FontSize', 10);
-    xlim([T_s(1) T_s(end)]); % Sincronizzazione X perfetta
-
-    % 5. Esportazione Finale
-    saveName = fullfile(saveFolder, sprintf('%03d_Sequence_PRH.png', k));
-    exportgraphics(hFig, saveName, 'Resolution', 300);
+    xlabel('Time [s]', 'FontWeight', 'bold');
+    legend('Pitch', 'Roll', 'Head', 'Depth', 'Location', 'southoutside', 'Orientation', 'horizontal');
+    xlim([T_s(1) T_s(end)]); 
+    
+    % Esportazione
+    exportgraphics(hFig, fullfile(saveFolder, sprintf('Seq_%03d_Sync.png', k)), 'Resolution', 300);
     close(hFig);
 end
-
-fprintf('\n✅ Elaborazione terminata. Grafici salvati in:\n%s\n', saveFolder);
-
-
-% %% 4 .mat file
-% [matFile, matPath] = uigetfile('*.mat', 'Seleziona il file .mat con i dati PRH-Depth');
-% if isequal(matFile,0), error('Caricamento .mat annullato.'); end
-% matData = load(fullfile(matPath, matFile));
-% %% Multi-Panel Plotting: Spectrogram + PRH & Depth
-% saveFolder = uigetdir(pwd, 'Seleziona cartella di output');
-% sensitivity_dB = -165; 
-% calib_factor = 10^(sensitivity_dB/20);
-% 
-% % --- ASSEGNAZIONE VARIABILI DAL .MAT ---
-% pitch_vec = matData.pitch;
-% roll_vec  = matData.roll;
-% head_vec  = matData.head;
-% depth_vec = matData.p;
-% fs_sensor = matData.fs; % Frequenza campionamento sensori (es. 10 o 25)
-% 
-% for k = 1:height(T_proc)
-%     % 1. Determina Finestra Temporale
-%     if isnan(T_proc.End_Pause_ts(k))
-%         base_start = T_proc.Reg_Click_Start_ts(k) - seconds(5);
-%     else
-%         base_start = T_proc.End_Pause_ts(k);
-%     end
-% 
-%     start_sec = seconds(base_start - wavStart_dur) - 2; 
-%     end_sec   = seconds(T_proc.Pause_Start_ts(k) - wavStart_dur) + 2;
-%     if end_sec <= start_sec, continue; end
-% 
-%     % 2. Spettrogramma (Audio Fs)
-%     idxStart = round(max(1, start_sec * Fs));
-%     idxEnd   = round(min(length(audioData), end_sec * Fs));
-%     segment  = audioData(idxStart:idxEnd);
-% 
-%     nwin = 4096;
-%     noverlap = round(nwin * 0.9); 
-%     p_seg = segment / calib_factor; 
-%     [~, F, T_s, P] = spectrogram(p_seg, hann(nwin), noverlap, nwin, Fs);
-%     A = 10*log10(abs(P)); 
-% 
-%     % 3. Estrazione Dati Sensori (Usando fs_sensor)
-%     % Calcoliamo gli indici corretti per i sensori partendo dai secondi
-%     sIdx_sensor = round(max(1, start_sec * fs_sensor));
-%     eIdx_sensor = round(min(length(depth_vec), end_sec * fs_sensor));
-%     sensorRange = sIdx_sensor:eIdx_sensor;
-% 
-%     % Tempo relativo per il plot dei sensori (allineato allo spettrogramma)
-%     t_sensor = (sensorRange / fs_sensor) - start_sec;
-% 
-%     % 4. Creazione Figura
-%     hFig = figure('Visible','off', 'Position', [100 100 1500 900]);
-%     t_layout = tiledlayout(2, 1, 'TileSpacing', 'compact');
-% 
-%     % --- TOP TILE: Spectrogram ---
-%     nexttile;
-%     surf(T_s, F/1000, zeros(size(A)), A, 'EdgeColor', 'none'); 
-%     view(0, 90); axis tight; axis xy;
-%     shading interp; colormap(gca, jet); clim([28 110]);
-%     ylabel('Freq [kHz]', 'FontWeight', 'bold');
-%     title(sprintf('Sequence #%d | Acoustic & PRH Profile', k));
-%     cb = colorbar; cb.Label.String = 'dB re 1 \muPa^2/Hz';
-%     hold on;
-% 
-%     % Marker eventi
-%     times = [T_proc.End_Pause_ts(k), T_proc.Reg_Click_Start_ts(k), ...
-%              T_proc.Creak_Start_ts(k), T_proc.Pause_Start_ts(k)];
-%     labels = {'EndPause', 'RegClick', 'Creak', 'Pause'};
-%     for i = 1:4
-%         if ~isnan(times(i))
-%             t_ev = seconds(times(i) - wavStart_dur) - start_sec;
-%             line([t_ev t_ev], [0 Fs/2000], [15 15], 'Color', 'w', 'LineStyle', '--', 'LineWidth', 1.2);
-%             text(t_ev, (Fs/2000)*0.8, 20, labels{i}, 'BackgroundColor', 'w', 'Rotation', 90, 'FontSize', 8);
-%         end
-%     end
-% 
-% % --- BOTTOM TILE: PRH & Depth ---
-%     nexttile;
-%     yyaxis left
-% 
-%     % Conversione da Radianti a Gradi (180/pi)
-%     rad2deg = 180/pi;
-%     p_deg = pitch_vec(sensorRange) * rad2deg;
-%     r_deg = roll_vec(sensorRange) * rad2deg;
-%     h_deg = head_vec(sensorRange) * rad2deg;
-% 
-%     plot(t_sensor, p_deg, 'r', 'LineWidth', 1.5); hold on;
-%     plot(t_sensor, r_deg, 'g', 'LineWidth', 1.5, 'LineStyle', '--');
-%     plot(t_sensor, h_deg, 'b', 'LineWidth', 1.5, 'LineStyle', ':');
-% 
-%     ylabel('Degrees (PRH)', 'FontWeight', 'bold');
-% 
-%     % Regolazione dinamica dei limiti Y per vedere i piccoli movimenti
-%     all_vals = [p_deg; r_deg; h_deg];
-%     if ~isempty(all_vals)
-%         % Centra la visualizzazione attorno ai dati attuali con un buffer di 5 gradi
-%         ylim([min(all_vals)-5, max(all_vals)+5]); 
-%     else
-%         ylim([-10 10]); % Default se mancano dati
-%     end
-% 
-%     yyaxis right
-%     plot(t_sensor, depth_vec(sensorRange), 'k', 'LineWidth', 2);
-%     set(gca, 'YDir', 'reverse'); % Inverti profondità: il basso è più profondo
-%     ylabel('Depth [m]', 'FontWeight', 'bold');
-% 
-%     xlabel('Time [s] (Relative to start)', 'FontWeight', 'bold');
-%     legend('Pitch', 'Roll', 'Heading', 'Depth', 'Location', 'southoutside', 'Orientation', 'horizontal');
-%     grid on;
-%     xlim([T_s(1) T_s(end)]); % Sincronizzazione perfetta asse X con spettrogramma
-% 
-%     % 5. Salvataggio e Chiusura Figura
-%     exportgraphics(hFig, fullfile(saveFolder, sprintf('%03d_PRH_Acoustics.png', k)), 'Resolution', 300);
-%     close(hFig);
-% end
-% disp(' Processo completato: Grafici PRH-Acustica salvati.');
+fprintf('\n✅ Elaborazione completata.\n');
